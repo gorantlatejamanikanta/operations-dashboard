@@ -343,7 +343,7 @@ jobs:
         echo "✅ Security policy compliance check completed"
 
     - name: License Compliance Check
-      uses: fossa-contrib/fossa-action@v2
+      uses: fossa-contrib/fossa-action@v3
       with:
         api-key: ${{ secrets.FOSSA_API_KEY }}
         path: "."
