@@ -264,14 +264,14 @@ jobs:
         output_file_path: checkov-terraform.sarif
 
     - name: Docker Security Scan (Hadolint)
-      uses: hadolint/hadolint-action@v3.1.0
+      uses: hadolint/hadolint-action@v3.3.0
       with:
         dockerfile: backend/Dockerfile
         format: sarif
         output-file: hadolint-backend.sarif
 
     - name: Docker Security Scan Frontend (Hadolint)
-      uses: hadolint/hadolint-action@v3.1.0
+      uses: hadolint/hadolint-action@v3.3.0
       with:
         dockerfile: frontend/Dockerfile
         format: sarif
