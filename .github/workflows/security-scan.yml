@@ -1,0 +1,453 @@
+name: Security Scan
+
+on:
+  schedule:
+    # Run security scans daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  # Comprehensive Security Analysis
+  security-analysis:
+    name: Security Analysis
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        scan-type: [sast, dependency, container, secrets]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    # Static Application Security Testing (SAST)
+    - name: SAST - CodeQL Analysis
+      if: matrix.scan-type == 'sast'
+      uses: github/codeql-action/init@v2
+      with:
+        languages: python, javascript
+
+    - name: SAST - Autobuild
+      if: matrix.scan-type == 'sast'
+      uses: github/codeql-action/autobuild@v2
+
+    - name: SAST - Perform Analysis
+      if: matrix.scan-type == 'sast'
+      uses: github/codeql-action/analyze@v2
+
+    - name: SAST - Semgrep Analysis
+      if: matrix.scan-type == 'sast'
+      uses: returntocorp/semgrep-action@v1
+      with:
+        config: >-
+          p/security-audit
+          p/secrets
+          p/owasp-top-ten
+          p/python
+          p/javascript
+
+    # Dependency Vulnerability Scanning
+    - name: Dependency - Python Safety Check
+      if: matrix.scan-type == 'dependency'
+      run: |
+        cd backend
+        python -m pip install --upgrade pip safety
+        safety check --json --output safety-report.json || true
+        safety check --short-report
+
+    - name: Dependency - Node.js Audit
+      if: matrix.scan-type == 'dependency'
+      run: |
+        cd frontend
+        npm audit --audit-level=moderate --json > npm-audit.json || true
+        npm audit --audit-level=moderate
+
+    - name: Dependency - Snyk Vulnerability Scan
+      if: matrix.scan-type == 'dependency'
+      uses: snyk/actions/node@master
+      continue-on-error: true
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      with:
+        args: --file=frontend/package.json --severity-threshold=medium
+
+    - name: Dependency - OSV Scanner
+      if: matrix.scan-type == 'dependency'
+      uses: google/osv-scanner-action@v1
+      with:
+        scan-args: |-
+          -r
+          --skip-git
+          ./
+
+    # Container Security Scanning
+    - name: Container - Build Images for Scanning
+      if: matrix.scan-type == 'container'
+      run: |
+        docker build -t backend-scan ./backend
+        docker build -t frontend-scan ./frontend
+
+    - name: Container - Trivy Scan Backend
+      if: matrix.scan-type == 'container'
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'backend-scan'
+        format: 'sarif'
+        output: 'trivy-backend.sarif'
+
+    - name: Container - Trivy Scan Frontend
+      if: matrix.scan-type == 'container'
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'frontend-scan'
+        format: 'sarif'
+        output: 'trivy-frontend.sarif'
+
+    - name: Container - Grype Vulnerability Scanner
+      if: matrix.scan-type == 'container'
+      uses: anchore/scan-action@v3
+      with:
+        image: "backend-scan"
+        fail-build: false
+        severity-cutoff: medium
+
+    # Secrets Scanning
+    - name: Secrets - TruffleHog Scan
+      if: matrix.scan-type == 'secrets'
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: main
+        head: HEAD
+        extra_args: --debug --only-verified
+
+    - name: Secrets - GitLeaks Scan
+      if: matrix.scan-type == 'secrets'
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    # Upload Results
+    - name: Upload SARIF results
+      if: always()
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: |
+          trivy-backend.sarif
+          trivy-frontend.sarif
+        category: security-scan-${{ matrix.scan-type }}
+
+    - name: Upload Security Reports
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-reports-${{ matrix.scan-type }}
+        path: |
+          backend/safety-report.json
+          frontend/npm-audit.json
+          trivy-*.sarif
+          results.sarif
+
+  # OWASP ZAP Dynamic Security Testing
+  dynamic-security-test:
+    name: Dynamic Security Testing
+    runs-on: ubuntu-latest
+    needs: security-analysis
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Start Backend Application
+      run: |
+        cd backend
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+        sleep 10
+      env:
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+        SECRET_KEY: test-secret-key-for-security-scan
+        ENVIRONMENT: test
+
+    - name: Start Frontend Application
+      run: |
+        cd frontend
+        npm ci
+        npm run build
+        npm start &
+        sleep 15
+      env:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+
+    - name: Wait for Applications
+      run: |
+        timeout 60 bash -c 'until curl -f http://localhost:8000/health; do sleep 2; done'
+        timeout 60 bash -c 'until curl -f http://localhost:3000; do sleep 2; done'
+
+    - name: OWASP ZAP Baseline Scan
+      uses: zaproxy/action-baseline@v0.7.0
+      with:
+        target: 'http://localhost:3000'
+        rules_file_name: '.zap/rules.tsv'
+        cmd_options: '-a'
+
+    - name: OWASP ZAP API Scan
+      uses: zaproxy/action-api-scan@v0.2.0
+      with:
+        target: 'http://localhost:8000'
+        format: openapi
+        api_spec: 'http://localhost:8000/openapi.json'
+        cmd_options: '-a'
+
+    - name: Upload ZAP Reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: zap-reports
+        path: |
+          report_html.html
+          report_json.json
+
+  # Infrastructure Security Scan
+  infrastructure-security:
+    name: Infrastructure Security
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Terraform Security Scan (Checkov)
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: terraform/
+        framework: terraform
+        output_format: sarif
+        output_file_path: checkov-terraform.sarif
+
+    - name: Docker Security Scan (Hadolint)
+      uses: hadolint/hadolint-action@v3.1.0
+      with:
+        dockerfile: backend/Dockerfile
+        format: sarif
+        output-file: hadolint-backend.sarif
+
+    - name: Docker Security Scan Frontend (Hadolint)
+      uses: hadolint/hadolint-action@v3.1.0
+      with:
+        dockerfile: frontend/Dockerfile
+        format: sarif
+        output-file: hadolint-frontend.sarif
+
+    - name: Kubernetes Security Scan (Kubesec)
+      if: hashFiles('k8s/*.yaml') != ''
+      run: |
+        curl -sSX POST --data-binary @k8s/deployment.yaml https://v2.kubesec.io/scan > kubesec-report.json || true
+
+    - name: Upload Infrastructure Security Reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: infrastructure-security-reports
+        path: |
+          checkov-terraform.sarif
+          hadolint-*.sarif
+          kubesec-report.json
+
+    - name: Upload SARIF files
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: |
+          checkov-terraform.sarif
+          hadolint-backend.sarif
+          hadolint-frontend.sarif
+
+  # Security Policy Compliance
+  compliance-check:
+    name: Security Compliance Check
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Check Security Policy Files
+      run: |
+        echo "Checking for required security files..."
+        
+        # Check for security policy
+        if [ ! -f "SECURITY.md" ]; then
+          echo "❌ SECURITY.md file missing"
+          exit 1
+        fi
+        
+        # Check for dependency files
+        if [ ! -f "backend/requirements.txt" ]; then
+          echo "❌ Backend requirements.txt missing"
+          exit 1
+        fi
+        
+        if [ ! -f "frontend/package.json" ]; then
+          echo "❌ Frontend package.json missing"
+          exit 1
+        fi
+        
+        # Check for Dockerfile security
+        if ! grep -q "USER" backend/Dockerfile; then
+          echo "⚠️ Backend Dockerfile should specify non-root USER"
+        fi
+        
+        if ! grep -q "USER" frontend/Dockerfile; then
+          echo "⚠️ Frontend Dockerfile should specify non-root USER"
+        fi
+        
+        echo "✅ Security policy compliance check completed"
+
+    - name: License Compliance Check
+      uses: fossa-contrib/fossa-action@v2
+      with:
+        api-key: ${{ secrets.FOSSA_API_KEY }}
+        path: "."
+
+  # Security Metrics and Reporting
+  security-metrics:
+    name: Security Metrics
+    runs-on: ubuntu-latest
+    needs: [security-analysis, dynamic-security-test, infrastructure-security, compliance-check]
+    if: always()
+
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+
+    - name: Generate Security Report
+      run: |
+        echo "# Security Scan Report" > security-report.md
+        echo "Generated on: $(date)" >> security-report.md
+        echo "" >> security-report.md
+        
+        echo "## Scan Results Summary" >> security-report.md
+        echo "- Static Analysis: ${{ needs.security-analysis.result }}" >> security-report.md
+        echo "- Dynamic Testing: ${{ needs.dynamic-security-test.result }}" >> security-report.md
+        echo "- Infrastructure Security: ${{ needs.infrastructure-security.result }}" >> security-report.md
+        echo "- Compliance Check: ${{ needs.compliance-check.result }}" >> security-report.md
+        echo "" >> security-report.md
+        
+        echo "## Recommendations" >> security-report.md
+        echo "1. Review all HIGH and CRITICAL vulnerabilities" >> security-report.md
+        echo "2. Update dependencies with known vulnerabilities" >> security-report.md
+        echo "3. Address container security issues" >> security-report.md
+        echo "4. Implement additional security controls as needed" >> security-report.md
+        
+        cat security-report.md
+
+    - name: Upload Security Report
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-report
+        path: security-report.md
+
+    - name: Comment PR with Security Results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const report = fs.readFileSync('security-report.md', 'utf8');
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## 🔒 Security Scan Results\n\n${report}`
+          });
+
+  # Security Notification
+  security-notification:
+    name: Security Notification
+    runs-on: ubuntu-latest
+    needs: [security-analysis, dynamic-security-test, infrastructure-security]
+    if: failure()
+
+    steps:
+    - name: Notify Security Team
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        text: |
+          🚨 Security scan failed!
+          
+          Repository: ${{ github.repository }}
+          Branch: ${{ github.ref }}
+          Commit: ${{ github.sha }}
+          
+          Please review the security findings immediately.
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SECURITY_SLACK_WEBHOOK_URL }}
+
+    - name: Create Security Issue
+      uses: actions/github-script@v6
+      with:
+        script: |
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: '🚨 Security Scan Failed - Immediate Action Required',
+            body: `
+            ## Security Scan Failure
+            
+            **Branch:** ${context.ref}
+            **Commit:** ${context.sha}
+            **Workflow:** ${context.workflow}
+            
+            One or more security scans have failed. Please review the workflow results and address any security vulnerabilities immediately.
+            
+            ### Next Steps:
+            1. Review the workflow logs
+            2. Address identified vulnerabilities
+            3. Re-run security scans
+            4. Update security documentation if needed
+            
+            **Priority:** HIGH
+            `,
+            labels: ['security', 'bug', 'high-priority']
+          });

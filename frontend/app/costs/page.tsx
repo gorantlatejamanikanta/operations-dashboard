@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ArrowLeft, Plus, Loader2 } from "lucide-react";
+import { ThemeToggle } from "@/app/components/ThemeToggle";
 import Link from "next/link";
 
 interface Cost {
@@ -52,15 +53,25 @@ export default function CostsPage() {
 
   const fetchData = async () => {
     try {
+      const headers = {
+        'Authorization': `Bearer demo-token`,
+      };
+
       const [costsRes, projectsRes] = await Promise.all([
-        fetch(`${API_URL}/api/costs/monthly`),
-        fetch(`${API_URL}/api/projects/`),
+        fetch(`${API_URL}/api/costs/monthly`, { headers }),
+        fetch(`${API_URL}/api/projects/`, { headers }),
       ]);
+
+      if (!costsRes.ok || !projectsRes.ok) {
+        throw new Error('Failed to fetch data');
+      }
 
       const [costsData, projectsData] = await Promise.all([
         costsRes.json(),
         projectsRes.json(),
       ]);
+
+      console.log('Costs data loaded:', { costsData, projectsData });
 
       setCosts(costsData);
       setProjects(projectsData);
@@ -73,7 +84,16 @@ export default function CostsPage() {
 
   const fetchResourceGroups = async (projectId: number) => {
     try {
-      const response = await fetch(`${API_URL}/api/resource-groups/?project_id=${projectId}`);
+      const response = await fetch(`${API_URL}/api/resource-groups/?project_id=${projectId}`, {
+        headers: {
+          'Authorization': `Bearer demo-token`,
+        },
+      });
+      
+      if (!response.ok) {
+        throw new Error('Failed to fetch resource groups');
+      }
+      
       const data = await response.json();
       setResourceGroups(data);
     } catch (error) {
@@ -88,6 +108,7 @@ export default function CostsPage() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          'Authorization': `Bearer demo-token`,
         },
         body: JSON.stringify({
           project_id: parseInt(formData.project_id),
@@ -147,10 +168,16 @@ export default function CostsPage() {
             <h1 className="text-4xl font-bold tracking-tight">Cost Management</h1>
             <p className="text-muted-foreground mt-2">View and manage monthly costs</p>
           </div>
-          <Button onClick={() => setShowForm(!showForm)} className="glass-card">
-            <Plus className="mr-2 h-4 w-4" />
-            {showForm ? "Cancel" : "Add Cost"}
-          </Button>
+          <div className="flex gap-2">
+            <ThemeToggle />
+            <Button 
+              onClick={() => setShowForm(!showForm)} 
+              className="bg-primary hover:bg-primary/90 text-primary-foreground"
+            >
+              <Plus className="mr-2 h-4 w-4" />
+              {showForm ? "Cancel" : "Add Cost"}
+            </Button>
+          </div>
         </div>
 
         {showForm && (

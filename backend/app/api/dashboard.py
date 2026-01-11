@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List, Dict
 from ..core.database import get_db
+from ..core.auth import get_current_user
 from ..models.project import Project
 from ..models.monthly_cost import MonthlyCost
 from ..models.project_cost_summary import ProjectCostSummary
@@ -11,10 +12,13 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
 @router.get("/stats")
-def get_dashboard_stats(db: Session = Depends(get_db)):
+def get_dashboard_stats(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
     """Get dashboard statistics"""
-    total_projects = db.query(func.count(Project.id)).scalar()
-    active_projects = db.query(func.count(Project.id)).filter(Project.is_active == True).scalar()
+    total_projects = db.query(func.count(Project.id)).scalar() or 0
+    active_projects = db.query(func.count(Project.id)).filter(Project.is_active == True).scalar() or 0
     
     total_cost = db.query(func.sum(ProjectCostSummary.total_cost_to_date)).scalar() or 0
     
@@ -26,7 +30,10 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
 
 
 @router.get("/cost-trends")
-def get_cost_trends(db: Session = Depends(get_db)):
+def get_cost_trends(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
     """Get cost trends by month"""
     trends = db.query(
         MonthlyCost.month,
@@ -43,7 +50,10 @@ def get_cost_trends(db: Session = Depends(get_db)):
 
 
 @router.get("/regional-distribution")
-def get_regional_distribution(db: Session = Depends(get_db)):
+def get_regional_distribution(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
     """Get cost distribution by region"""
     distribution = db.query(
         Project.deployed_region,

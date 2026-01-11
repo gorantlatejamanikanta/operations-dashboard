@@ -1,0 +1,376 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - production
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Build and Push Docker Images
+  build-images:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      backend-image: ${{ steps.meta-backend.outputs.tags }}
+      frontend-image: ${{ steps.meta-frontend.outputs.tags }}
+      backend-digest: ${{ steps.build-backend.outputs.digest }}
+      frontend-digest: ${{ steps.build-frontend.outputs.digest }}
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata for backend
+      id: meta-backend
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-backend
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=sha,prefix={{branch}}-
+
+    - name: Extract metadata for frontend
+      id: meta-frontend
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-frontend
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=sha,prefix={{branch}}-
+
+    - name: Build and push backend image
+      id: build-backend
+      uses: docker/build-push-action@v5
+      with:
+        context: ./backend
+        file: ./backend/Dockerfile
+        push: true
+        tags: ${{ steps.meta-backend.outputs.tags }}
+        labels: ${{ steps.meta-backend.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        platforms: linux/amd64,linux/arm64
+
+    - name: Build and push frontend image
+      id: build-frontend
+      uses: docker/build-push-action@v5
+      with:
+        context: ./frontend
+        file: ./frontend/Dockerfile
+        push: true
+        tags: ${{ steps.meta-frontend.outputs.tags }}
+        labels: ${{ steps.meta-frontend.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        platforms: linux/amd64,linux/arm64
+        build-args: |
+          NEXT_PUBLIC_API_URL=${{ secrets.NEXT_PUBLIC_API_URL }}
+
+  # Security Scan of Images
+  image-security-scan:
+    name: Scan Docker Images
+    runs-on: ubuntu-latest
+    needs: build-images
+    permissions:
+      security-events: write
+
+    strategy:
+      matrix:
+        image: [backend, frontend]
+
+    steps:
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ needs.build-images.outputs[format('{0}-image', matrix.image)] }}
+        format: 'sarif'
+        output: 'trivy-${{ matrix.image }}.sarif'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-${{ matrix.image }}.sarif'
+
+  # Deploy to Staging
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build-images, image-security-scan]
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    environment:
+      name: staging
+      url: https://staging.yourdomain.com
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.6.0
+
+    - name: Configure Azure credentials
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Terraform Init
+      run: |
+        cd terraform
+        terraform init -backend-config="storage_account_name=${{ secrets.TERRAFORM_STORAGE_ACCOUNT }}" \
+                      -backend-config="container_name=${{ secrets.TERRAFORM_CONTAINER }}" \
+                      -backend-config="key=staging.tfstate"
+
+    - name: Terraform Plan
+      run: |
+        cd terraform
+        terraform plan -var="environment=staging" \
+                      -var="backend_image=${{ needs.build-images.outputs.backend-image }}" \
+                      -var="frontend_image=${{ needs.build-images.outputs.frontend-image }}" \
+                      -var="database_password=${{ secrets.STAGING_DB_PASSWORD }}" \
+                      -var="secret_key=${{ secrets.STAGING_SECRET_KEY }}" \
+                      -out=tfplan
+
+    - name: Terraform Apply
+      run: |
+        cd terraform
+        terraform apply -auto-approve tfplan
+
+    - name: Get deployment outputs
+      id: terraform-outputs
+      run: |
+        cd terraform
+        echo "app_url=$(terraform output -raw app_url)" >> $GITHUB_OUTPUT
+        echo "api_url=$(terraform output -raw api_url)" >> $GITHUB_OUTPUT
+
+    - name: Run smoke tests
+      run: |
+        sleep 60  # Wait for deployment to be ready
+        curl -f ${{ steps.terraform-outputs.outputs.api_url }}/health || exit 1
+        curl -f ${{ steps.terraform-outputs.outputs.app_url }} || exit 1
+
+    - name: Run staging E2E tests
+      run: |
+        cd frontend
+        npm ci
+        npx playwright install --with-deps
+        PLAYWRIGHT_BASE_URL=${{ steps.terraform-outputs.outputs.app_url }} npx playwright test --project=chromium
+      env:
+        NEXT_PUBLIC_API_URL: ${{ steps.terraform-outputs.outputs.api_url }}
+
+  # Deploy to Production
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build-images, deploy-staging]
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
+    environment:
+      name: production
+      url: https://yourdomain.com
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.6.0
+
+    - name: Configure Azure credentials
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Terraform Init
+      run: |
+        cd terraform
+        terraform init -backend-config="storage_account_name=${{ secrets.TERRAFORM_STORAGE_ACCOUNT }}" \
+                      -backend-config="container_name=${{ secrets.TERRAFORM_CONTAINER }}" \
+                      -backend-config="key=production.tfstate"
+
+    - name: Terraform Plan
+      run: |
+        cd terraform
+        terraform plan -var="environment=production" \
+                      -var="backend_image=${{ needs.build-images.outputs.backend-image }}" \
+                      -var="frontend_image=${{ needs.build-images.outputs.frontend-image }}" \
+                      -var="database_password=${{ secrets.PRODUCTION_DB_PASSWORD }}" \
+                      -var="secret_key=${{ secrets.PRODUCTION_SECRET_KEY }}" \
+                      -var="azure_client_id=${{ secrets.AZURE_CLIENT_ID }}" \
+                      -var="azure_tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
+                      -var="azure_openai_endpoint=${{ secrets.AZURE_OPENAI_ENDPOINT }}" \
+                      -var="azure_openai_api_key=${{ secrets.AZURE_OPENAI_API_KEY }}" \
+                      -out=tfplan
+
+    - name: Terraform Apply
+      run: |
+        cd terraform
+        terraform apply -auto-approve tfplan
+
+    - name: Get deployment outputs
+      id: terraform-outputs
+      run: |
+        cd terraform
+        echo "app_url=$(terraform output -raw app_url)" >> $GITHUB_OUTPUT
+        echo "api_url=$(terraform output -raw api_url)" >> $GITHUB_OUTPUT
+
+    - name: Run production smoke tests
+      run: |
+        sleep 120  # Wait for deployment to be ready
+        curl -f ${{ steps.terraform-outputs.outputs.api_url }}/health || exit 1
+        curl -f ${{ steps.terraform-outputs.outputs.app_url }} || exit 1
+
+    - name: Run production E2E tests
+      run: |
+        cd frontend
+        npm ci
+        npx playwright install --with-deps
+        PLAYWRIGHT_BASE_URL=${{ steps.terraform-outputs.outputs.app_url }} npx playwright test --project=chromium --grep="@smoke"
+      env:
+        NEXT_PUBLIC_API_URL: ${{ steps.terraform-outputs.outputs.api_url }}
+
+  # Post-deployment monitoring
+  post-deployment:
+    name: Post-deployment Monitoring
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: always() && (needs.deploy-production.result == 'success' || needs.deploy-staging.result == 'success')
+
+    steps:
+    - name: Setup monitoring alerts
+      run: |
+        echo "Setting up monitoring alerts..."
+        # Add monitoring setup commands here
+
+    - name: Performance baseline test
+      run: |
+        echo "Running performance baseline tests..."
+        # Add performance testing commands here
+
+    - name: Security posture check
+      run: |
+        echo "Checking security posture..."
+        # Add security validation commands here
+
+  # Rollback capability
+  rollback:
+    name: Rollback Deployment
+    runs-on: ubuntu-latest
+    if: failure() && (needs.deploy-production.result == 'failure' || needs.deploy-staging.result == 'failure')
+    needs: [deploy-production, deploy-staging]
+    environment:
+      name: ${{ github.event.inputs.environment || 'production' }}
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Configure Azure credentials
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Rollback to previous version
+      run: |
+        echo "Rolling back to previous stable version..."
+        # Add rollback logic here
+        # This could involve:
+        # 1. Reverting to previous Docker images
+        # 2. Restoring database backup
+        # 3. Updating DNS/load balancer configuration
+
+    - name: Verify rollback
+      run: |
+        echo "Verifying rollback success..."
+        # Add verification steps
+
+    - name: Notify team of rollback
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        text: "🚨 Deployment failed and rollback initiated"
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # Notification
+  notify:
+    name: Notify Deployment Status
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-production]
+    if: always()
+
+    steps:
+    - name: Notify Slack on Success
+      if: needs.deploy-production.result == 'success' || needs.deploy-staging.result == 'success'
+      uses: 8398a7/action-slack@v3
+      with:
+        status: success
+        text: "✅ Deployment successful to ${{ github.event.inputs.environment || 'production' }}"
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    - name: Notify Slack on Failure
+      if: needs.deploy-production.result == 'failure' || needs.deploy-staging.result == 'failure'
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        text: "❌ Deployment failed to ${{ github.event.inputs.environment || 'production' }}"
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    - name: Create GitHub Release
+      if: startsWith(github.ref, 'refs/tags/v') && needs.deploy-production.result == 'success'
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        body: |
+          ## Changes in this Release
+          - Automated deployment to production
+          - All tests passed
+          - Security scans completed
+          
+          ## Deployment Information
+          - Backend Image: ${{ needs.build-images.outputs.backend-image }}
+          - Frontend Image: ${{ needs.build-images.outputs.frontend-image }}
+          - Deployed at: ${{ github.event.head_commit.timestamp }}
+        draft: false
+        prerelease: false

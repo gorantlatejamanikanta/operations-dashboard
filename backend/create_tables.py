@@ -8,6 +8,7 @@ from app.models import (
     MonthlyCost,
     CostData,
     ProjectCostSummary,
+    CloudConnection,
 )
 
 if __name__ == "__main__":

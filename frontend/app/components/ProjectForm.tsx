@@ -3,107 +3,92 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Loader2, Plus } from "lucide-react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Plus, Loader2 } from "lucide-react";
 
-interface ProjectFormData {
-  project_name: string;
-  project_type: string;
-  member_firm: string;
-  deployed_region: string;
-  is_active: boolean;
-  description: string;
-  engagement_code: string;
-  engagement_partner: string;
-  opportunity_code: string;
-  engagement_manager: string;
-  project_startdate: string;
-  project_enddate: string;
+interface ProjectFormProps {
+  onSuccess?: () => void;
+  editProject?: any;
 }
 
-export default function ProjectForm({ onSuccess }: { onSuccess?: () => void }) {
-  const [isOpen, setIsOpen] = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [formData, setFormData] = useState<ProjectFormData>({
-    project_name: "",
-    project_type: "Internal",
-    member_firm: "",
-    deployed_region: "US",
-    is_active: true,
-    description: "",
-    engagement_code: "",
-    engagement_partner: "",
-    opportunity_code: "",
-    engagement_manager: "",
-    project_startdate: new Date().toISOString().split("T")[0],
-    project_enddate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
+export default function ProjectForm({ onSuccess, editProject }: ProjectFormProps) {
+  const [showForm, setShowForm] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [formData, setFormData] = useState({
+    project_name: editProject?.project_name || "",
+    project_type: editProject?.project_type || "Internal",
+    member_firm: editProject?.member_firm || "",
+    deployed_region: editProject?.deployed_region || "US",
+    is_active: editProject?.is_active ?? true,
+    description: editProject?.description || "",
+    engagement_code: editProject?.engagement_code || "",
+    engagement_partner: editProject?.engagement_partner || "",
+    opportunity_code: editProject?.opportunity_code || "",
+    engagement_manager: editProject?.engagement_manager || "",
+    project_startdate: editProject?.project_startdate || new Date().toISOString().split("T")[0],
+    project_enddate: editProject?.project_enddate || new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
   });
 
   const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsSubmitting(true);
+    setLoading(true);
 
     try {
-      const response = await fetch(`${API_URL}/api/projects/`, {
-        method: "POST",
+      const url = editProject 
+        ? `${API_URL}/api/projects/${editProject.id}`
+        : `${API_URL}/api/projects/`;
+      
+      const method = editProject ? "PUT" : "POST";
+
+      const response = await fetch(url, {
+        method,
         headers: {
           "Content-Type": "application/json",
+          'Authorization': `Bearer demo-token`,
         },
         body: JSON.stringify(formData),
       });
 
-      if (!response.ok) {
+      if (response.ok) {
+        setShowForm(false);
+        setFormData({
+          project_name: "",
+          project_type: "Internal",
+          member_firm: "",
+          deployed_region: "US",
+          is_active: true,
+          description: "",
+          engagement_code: "",
+          engagement_partner: "",
+          opportunity_code: "",
+          engagement_manager: "",
+          project_startdate: new Date().toISOString().split("T")[0],
+          project_enddate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
+        });
+        onSuccess?.();
+        alert(`Project ${editProject ? "updated" : "created"} successfully!`);
+      } else {
         const error = await response.json();
-        throw new Error(error.detail || "Failed to create project");
+        alert(`Error: ${error.detail || `Failed to ${editProject ? "update" : "create"} project`}`);
       }
-
-      const newProject = await response.json();
-      console.log("Project created:", newProject);
-      
-      // Reset form
-      setFormData({
-        project_name: "",
-        project_type: "Internal",
-        member_firm: "",
-        deployed_region: "US",
-        is_active: true,
-        description: "",
-        engagement_code: "",
-        engagement_partner: "",
-        opportunity_code: "",
-        engagement_manager: "",
-        project_startdate: new Date().toISOString().split("T")[0],
-        project_enddate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
-      });
-
-      setIsOpen(false);
-      if (onSuccess) {
-        onSuccess();
-      }
-      alert("Project created successfully!");
     } catch (error) {
-      console.error("Error creating project:", error);
-      alert(`Error: ${error instanceof Error ? error.message : "Failed to create project"}`);
+      console.error("Error submitting project:", error);
+      alert(`Error ${editProject ? "updating" : "creating"} project`);
     } finally {
-      setIsSubmitting(false);
+      setLoading(false);
     }
   };
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
-    const { name, value, type } = e.target;
-    setFormData((prev) => ({
-      ...prev,
-      [name]: type === "checkbox" ? (e.target as HTMLInputElement).checked : value,
-    }));
-  };
-
-  if (!isOpen) {
+  if (!showForm && !editProject) {
     return (
-      <Button onClick={() => setIsOpen(true)} className="glass-card">
+      <Button 
+        onClick={() => setShowForm(true)} 
+        className="bg-primary hover:bg-primary/90 text-primary-foreground"
+      >
         <Plus className="mr-2 h-4 w-4" />
-        Add New Project
+        Add Project
       </Button>
     );
   }
@@ -111,8 +96,7 @@ export default function ProjectForm({ onSuccess }: { onSuccess?: () => void }) {
   return (
     <Card className="glass-card">
       <CardHeader>
-        <CardTitle>Onboard New Project</CardTitle>
-        <CardDescription>Create a new project in the system</CardDescription>
+        <CardTitle>{editProject ? "Edit Project" : "New Project"}</CardTitle>
       </CardHeader>
       <CardContent>
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -120,9 +104,8 @@ export default function ProjectForm({ onSuccess }: { onSuccess?: () => void }) {
             <div>
               <label className="text-sm font-medium mb-1 block">Project Name *</label>
               <Input
-                name="project_name"
                 value={formData.project_name}
-                onChange={handleChange}
+                onChange={(e) => setFormData({ ...formData, project_name: e.target.value })}
                 required
                 placeholder="Enter project name"
               />
@@ -131,11 +114,10 @@ export default function ProjectForm({ onSuccess }: { onSuccess?: () => void }) {
             <div>
               <label className="text-sm font-medium mb-1 block">Project Type *</label>
               <select
-                name="project_type"
                 value={formData.project_type}
-                onChange={handleChange}
+                onChange={(e) => setFormData({ ...formData, project_type: e.target.value })}
                 required
-                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
               >
                 <option value="Internal">Internal</option>
                 <option value="External">External</option>
@@ -146,22 +128,20 @@ export default function ProjectForm({ onSuccess }: { onSuccess?: () => void }) {
             <div>
               <label className="text-sm font-medium mb-1 block">Member Firm *</label>
               <Input
-                name="member_firm"
                 value={formData.member_firm}
-                onChange={handleChange}
+                onChange={(e) => setFormData({ ...formData, member_firm: e.target.value })}
                 required
-                placeholder="e.g., US Office"
+                placeholder="Enter member firm"
               />
             </div>
 
             <div>
               <label className="text-sm font-medium mb-1 block">Deployed Region *</label>
               <select
-                name="deployed_region"
                 value={formData.deployed_region}
-                onChange={handleChange}
+                onChange={(e) => setFormData({ ...formData, deployed_region: e.target.value })}
                 required
-                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
               >
                 <option value="US">US</option>
                 <option value="EU">EU</option>
@@ -172,10 +152,9 @@ export default function ProjectForm({ onSuccess }: { onSuccess?: () => void }) {
             <div>
               <label className="text-sm font-medium mb-1 block">Start Date *</label>
               <Input
-                name="project_startdate"
                 type="date"
                 value={formData.project_startdate}
-                onChange={handleChange}
+                onChange={(e) => setFormData({ ...formData, project_startdate: e.target.value })}
                 required
               />
             </div>
@@ -183,51 +162,46 @@ export default function ProjectForm({ onSuccess }: { onSuccess?: () => void }) {
             <div>
               <label className="text-sm font-medium mb-1 block">End Date *</label>
               <Input
-                name="project_enddate"
                 type="date"
                 value={formData.project_enddate}
-                onChange={handleChange}
+                onChange={(e) => setFormData({ ...formData, project_enddate: e.target.value })}
                 required
-              />
-            </div>
-
-            <div>
-              <label className="text-sm font-medium mb-1 block">Engagement Code</label>
-              <Input
-                name="engagement_code"
-                value={formData.engagement_code}
-                onChange={handleChange}
-                placeholder="e.g., ENG-001"
-              />
-            </div>
-
-            <div>
-              <label className="text-sm font-medium mb-1 block">Engagement Partner</label>
-              <Input
-                name="engagement_partner"
-                value={formData.engagement_partner}
-                onChange={handleChange}
-                placeholder="Partner name"
-              />
-            </div>
-
-            <div>
-              <label className="text-sm font-medium mb-1 block">Opportunity Code</label>
-              <Input
-                name="opportunity_code"
-                value={formData.opportunity_code}
-                onChange={handleChange}
-                placeholder="e.g., OPP-001"
               />
             </div>
 
             <div>
               <label className="text-sm font-medium mb-1 block">Engagement Manager</label>
               <Input
-                name="engagement_manager"
                 value={formData.engagement_manager}
-                onChange={handleChange}
-                placeholder="Manager name"
+                onChange={(e) => setFormData({ ...formData, engagement_manager: e.target.value })}
+                placeholder="Enter engagement manager"
+              />
+            </div>
+
+            <div>
+              <label className="text-sm font-medium mb-1 block">Engagement Partner</label>
+              <Input
+                value={formData.engagement_partner}
+                onChange={(e) => setFormData({ ...formData, engagement_partner: e.target.value })}
+                placeholder="Enter engagement partner"
+              />
+            </div>
+
+            <div>
+              <label className="text-sm font-medium mb-1 block">Engagement Code</label>
+              <Input
+                value={formData.engagement_code}
+                onChange={(e) => setFormData({ ...formData, engagement_code: e.target.value })}
+                placeholder="Enter engagement code"
+              />
+            </div>
+
+            <div>
+              <label className="text-sm font-medium mb-1 block">Opportunity Code</label>
+              <Input
+                value={formData.opportunity_code}
+                onChange={(e) => setFormData({ ...formData, opportunity_code: e.target.value })}
+                placeholder="Enter opportunity code"
               />
             </div>
           </div>
@@ -235,12 +209,11 @@ export default function ProjectForm({ onSuccess }: { onSuccess?: () => void }) {
           <div>
             <label className="text-sm font-medium mb-1 block">Description</label>
             <textarea
-              name="description"
               value={formData.description}
-              onChange={handleChange}
+              onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+              placeholder="Enter project description"
+              className="flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
               rows={3}
-              className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-              placeholder="Project description"
             />
           </div>
 
@@ -248,35 +221,31 @@ export default function ProjectForm({ onSuccess }: { onSuccess?: () => void }) {
             <input
               type="checkbox"
               id="is_active"
-              name="is_active"
               checked={formData.is_active}
-              onChange={(e) => setFormData((prev) => ({ ...prev, is_active: e.target.checked }))}
-              className="h-4 w-4 rounded border-gray-300"
+              onChange={(e) => setFormData({ ...formData, is_active: e.target.checked })}
+              className="h-4 w-4"
             />
             <label htmlFor="is_active" className="text-sm font-medium">
               Active Project
             </label>
           </div>
 
-          <div className="flex gap-2 pt-4">
-            <Button type="submit" disabled={isSubmitting}>
-              {isSubmitting ? (
+          <div className="flex gap-2">
+            <Button type="submit" disabled={loading}>
+              {loading ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Creating...
+                  {editProject ? "Updating..." : "Creating..."}
                 </>
               ) : (
-                "Create Project"
+                editProject ? "Update Project" : "Create Project"
               )}
             </Button>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setIsOpen(false)}
-              disabled={isSubmitting}
-            >
-              Cancel
-            </Button>
+            {!editProject && (
+              <Button type="button" variant="outline" onClick={() => setShowForm(false)}>
+                Cancel
+              </Button>
+            )}
           </div>
         </form>
       </CardContent>

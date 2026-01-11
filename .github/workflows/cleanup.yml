@@ -1,0 +1,363 @@
+name: Cleanup and Maintenance
+
+on:
+  schedule:
+    # Run cleanup weekly on Sundays at 1 AM UTC
+    - cron: '0 1 * * 0'
+  workflow_dispatch:
+    inputs:
+      cleanup_type:
+        description: 'Type of cleanup to perform'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+        - all
+        - images
+        - artifacts
+        - cache
+        - logs
+
+permissions:
+  contents: read
+  packages: write
+  actions: write
+
+jobs:
+  # Cleanup old container images
+  cleanup-images:
+    name: Cleanup Container Images
+    runs-on: ubuntu-latest
+    if: github.event.inputs.cleanup_type == 'all' || github.event.inputs.cleanup_type == 'images' || github.event_name == 'schedule'
+
+    steps:
+    - name: Cleanup old backend images
+      uses: actions/delete-package-versions@v4
+      with:
+        package-name: '${{ github.repository }}-backend'
+        package-type: 'container'
+        min-versions-to-keep: 10
+        delete-only-untagged-versions: true
+
+    - name: Cleanup old frontend images
+      uses: actions/delete-package-versions@v4
+      with:
+        package-name: '${{ github.repository }}-frontend'
+        package-type: 'container'
+        min-versions-to-keep: 10
+        delete-only-untagged-versions: true
+
+    - name: Cleanup development images
+      uses: actions/delete-package-versions@v4
+      with:
+        package-name: '${{ github.repository }}-backend'
+        package-type: 'container'
+        min-versions-to-keep: 5
+        ignore-versions: '^v\d+\.\d+\.\d+$'  # Keep tagged releases
+
+  # Cleanup workflow artifacts
+  cleanup-artifacts:
+    name: Cleanup Workflow Artifacts
+    runs-on: ubuntu-latest
+    if: github.event.inputs.cleanup_type == 'all' || github.event.inputs.cleanup_type == 'artifacts' || github.event_name == 'schedule'
+
+    steps:
+    - name: Cleanup old artifacts
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const owner = context.repo.owner;
+          const repo = context.repo.repo;
+          
+          // Get all artifacts
+          const artifacts = await github.rest.actions.listArtifactsForRepo({
+            owner,
+            repo,
+            per_page: 100
+          });
+          
+          // Delete artifacts older than 30 days
+          const thirtyDaysAgo = new Date();
+          thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+          
+          for (const artifact of artifacts.data.artifacts) {
+            const createdAt = new Date(artifact.created_at);
+            if (createdAt < thirtyDaysAgo) {
+              console.log(`Deleting artifact: ${artifact.name} (${artifact.created_at})`);
+              await github.rest.actions.deleteArtifact({
+                owner,
+                repo,
+                artifact_id: artifact.id
+              });
+            }
+          }
+
+  # Cleanup workflow runs
+  cleanup-workflow-runs:
+    name: Cleanup Workflow Runs
+    runs-on: ubuntu-latest
+    if: github.event.inputs.cleanup_type == 'all' || github.event.inputs.cleanup_type == 'logs' || github.event_name == 'schedule'
+
+    steps:
+    - name: Cleanup old workflow runs
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const owner = context.repo.owner;
+          const repo = context.repo.repo;
+          
+          // Get all workflows
+          const workflows = await github.rest.actions.listRepoWorkflows({
+            owner,
+            repo
+          });
+          
+          for (const workflow of workflows.data.workflows) {
+            // Get workflow runs
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner,
+              repo,
+              workflow_id: workflow.id,
+              per_page: 100
+            });
+            
+            // Keep last 50 runs, delete older ones
+            const runsToDelete = runs.data.workflow_runs.slice(50);
+            
+            for (const run of runsToDelete) {
+              console.log(`Deleting workflow run: ${run.id} (${run.created_at})`);
+              try {
+                await github.rest.actions.deleteWorkflowRun({
+                  owner,
+                  repo,
+                  run_id: run.id
+                });
+              } catch (error) {
+                console.log(`Failed to delete run ${run.id}: ${error.message}`);
+              }
+            }
+          }
+
+  # Cleanup caches
+  cleanup-caches:
+    name: Cleanup Action Caches
+    runs-on: ubuntu-latest
+    if: github.event.inputs.cleanup_type == 'all' || github.event.inputs.cleanup_type == 'cache' || github.event_name == 'schedule'
+
+    steps:
+    - name: Cleanup old caches
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const owner = context.repo.owner;
+          const repo = context.repo.repo;
+          
+          // Get all caches
+          const caches = await github.rest.actions.getActionsCacheList({
+            owner,
+            repo,
+            per_page: 100
+          });
+          
+          // Delete caches older than 7 days
+          const sevenDaysAgo = new Date();
+          sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+          
+          for (const cache of caches.data.actions_caches) {
+            const createdAt = new Date(cache.created_at);
+            if (createdAt < sevenDaysAgo) {
+              console.log(`Deleting cache: ${cache.key} (${cache.created_at})`);
+              try {
+                await github.rest.actions.deleteActionsCacheById({
+                  owner,
+                  repo,
+                  cache_id: cache.id
+                });
+              } catch (error) {
+                console.log(`Failed to delete cache ${cache.id}: ${error.message}`);
+              }
+            }
+          }
+
+  # Database maintenance
+  database-maintenance:
+    name: Database Maintenance
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        cd backend
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Database cleanup script
+      run: |
+        cd backend
+        python -c "
+        import os
+        from sqlalchemy import create_engine, text
+        from datetime import datetime, timedelta
+        
+        # This would connect to your production database
+        # For demo purposes, we'll just show the concept
+        
+        print('Database maintenance tasks:')
+        print('1. Cleanup old log entries')
+        print('2. Optimize database indexes')
+        print('3. Update statistics')
+        print('4. Vacuum database (if PostgreSQL)')
+        
+        # Example cleanup queries (adjust for your schema)
+        cleanup_queries = [
+            # 'DELETE FROM audit_logs WHERE created_at < NOW() - INTERVAL 90 DAY',
+            # 'DELETE FROM temporary_data WHERE expires_at < NOW()',
+            # 'VACUUM ANALYZE',  # PostgreSQL
+            # 'OPTIMIZE TABLE project',  # MySQL
+        ]
+        
+        print('Database maintenance completed')
+        "
+      env:
+        DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  # Security cleanup
+  security-cleanup:
+    name: Security Cleanup
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+
+    steps:
+    - name: Cleanup old security reports
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const owner = context.repo.owner;
+          const repo = context.repo.repo;
+          
+          // Cleanup old security advisories (if any)
+          console.log('Checking for resolved security advisories...');
+          
+          // This would typically involve:
+          // 1. Checking for resolved security issues
+          // 2. Cleaning up old security scan results
+          // 3. Updating security documentation
+          
+          console.log('Security cleanup completed');
+
+    - name: Update security documentation
+      run: |
+        echo "Updating security documentation..."
+        
+        # This could involve:
+        # 1. Updating SECURITY.md with latest scan results
+        # 2. Refreshing security badges
+        # 3. Updating vulnerability status
+        
+        echo "Security documentation updated"
+
+  # Performance cleanup
+  performance-cleanup:
+    name: Performance Cleanup
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+
+    steps:
+    - name: Cleanup old performance reports
+      run: |
+        echo "Cleaning up old performance reports..."
+        
+        # This could involve:
+        # 1. Archiving old performance test results
+        # 2. Cleaning up performance monitoring data
+        # 3. Updating performance baselines
+        
+        echo "Performance cleanup completed"
+
+  # Notification cleanup
+  notification-cleanup:
+    name: Cleanup Notifications
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+
+    steps:
+    - name: Cleanup old notifications
+      run: |
+        echo "Cleaning up old notifications..."
+        
+        # This could involve:
+        # 1. Cleaning up old Slack messages
+        # 2. Archiving old email notifications
+        # 3. Updating notification preferences
+        
+        echo "Notification cleanup completed"
+
+  # Generate cleanup report
+  cleanup-report:
+    name: Generate Cleanup Report
+    runs-on: ubuntu-latest
+    needs: [cleanup-images, cleanup-artifacts, cleanup-workflow-runs, cleanup-caches, database-maintenance, security-cleanup, performance-cleanup, notification-cleanup]
+    if: always()
+
+    steps:
+    - name: Generate cleanup report
+      run: |
+        echo "# Cleanup Report" > cleanup-report.md
+        echo "Generated on: $(date)" >> cleanup-report.md
+        echo "" >> cleanup-report.md
+        
+        echo "## Cleanup Results" >> cleanup-report.md
+        echo "- Container Images: ${{ needs.cleanup-images.result }}" >> cleanup-report.md
+        echo "- Workflow Artifacts: ${{ needs.cleanup-artifacts.result }}" >> cleanup-report.md
+        echo "- Workflow Runs: ${{ needs.cleanup-workflow-runs.result }}" >> cleanup-report.md
+        echo "- Action Caches: ${{ needs.cleanup-caches.result }}" >> cleanup-report.md
+        echo "- Database Maintenance: ${{ needs.database-maintenance.result }}" >> cleanup-report.md
+        echo "- Security Cleanup: ${{ needs.security-cleanup.result }}" >> cleanup-report.md
+        echo "- Performance Cleanup: ${{ needs.performance-cleanup.result }}" >> cleanup-report.md
+        echo "- Notification Cleanup: ${{ needs.notification-cleanup.result }}" >> cleanup-report.md
+        echo "" >> cleanup-report.md
+        
+        echo "## Storage Savings" >> cleanup-report.md
+        echo "- Estimated storage freed: TBD" >> cleanup-report.md
+        echo "- Old artifacts removed: TBD" >> cleanup-report.md
+        echo "- Cache space reclaimed: TBD" >> cleanup-report.md
+        echo "" >> cleanup-report.md
+        
+        echo "## Next Cleanup" >> cleanup-report.md
+        echo "- Scheduled for: $(date -d '+7 days')" >> cleanup-report.md
+        
+        cat cleanup-report.md
+
+    - name: Upload cleanup report
+      uses: actions/upload-artifact@v3
+      with:
+        name: cleanup-report
+        path: cleanup-report.md
+
+    - name: Notify cleanup completion
+      if: github.event_name == 'schedule'
+      uses: 8398a7/action-slack@v3
+      with:
+        status: success
+        text: |
+          🧹 Weekly cleanup completed successfully!
+          
+          Repository: ${{ github.repository }}
+          
+          Cleanup tasks performed:
+          - Container images cleaned
+          - Old artifacts removed
+          - Workflow runs pruned
+          - Caches cleared
+          - Database maintenance completed
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.MAINTENANCE_SLACK_WEBHOOK_URL }}

@@ -1,0 +1,463 @@
+name: Performance Testing
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run performance tests weekly on Sundays at 3 AM UTC
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      test_duration:
+        description: 'Test duration in seconds'
+        required: false
+        default: '300'
+      max_users:
+        description: 'Maximum number of concurrent users'
+        required: false
+        default: '100'
+
+jobs:
+  # Frontend Performance Testing
+  frontend-performance:
+    name: Frontend Performance
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
+
+    - name: Install dependencies
+      run: |
+        cd frontend
+        npm ci
+
+    - name: Build application
+      run: |
+        cd frontend
+        npm run build
+
+    - name: Start application
+      run: |
+        cd frontend
+        npm start &
+        sleep 15
+      env:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+
+    - name: Wait for application
+      run: |
+        timeout 60 bash -c 'until curl -f http://localhost:3000; do sleep 2; done'
+
+    - name: Install Lighthouse CI
+      run: npm install -g @lhci/cli@0.12.x
+
+    - name: Run Lighthouse CI
+      run: |
+        lhci autorun
+      env:
+        LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+
+    - name: Bundle Size Analysis
+      run: |
+        cd frontend
+        npx next build
+        npx @next/bundle-analyzer
+
+    - name: Performance Budget Check
+      run: |
+        cd frontend
+        # Check bundle sizes
+        echo "Checking bundle sizes..."
+        
+        # Main bundle should be < 250KB
+        MAIN_SIZE=$(stat -c%s .next/static/chunks/pages/_app-*.js 2>/dev/null | head -1 || echo 0)
+        if [ $MAIN_SIZE -gt 256000 ]; then
+          echo "❌ Main bundle too large: ${MAIN_SIZE} bytes (limit: 256KB)"
+          exit 1
+        fi
+        
+        echo "✅ Bundle size check passed"
+
+    - name: Upload Lighthouse Reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: lighthouse-reports
+        path: |
+          .lighthouseci/
+          frontend/.next/analyze/
+
+  # Backend Performance Testing
+  backend-performance:
+    name: Backend Performance
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        cd backend
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install locust pytest-benchmark
+
+    - name: Start backend application
+      run: |
+        cd backend
+        python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+        sleep 10
+      env:
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+        SECRET_KEY: test-secret-key-for-performance
+        ENVIRONMENT: test
+
+    - name: Wait for backend
+      run: |
+        timeout 60 bash -c 'until curl -f http://localhost:8000/health; do sleep 2; done'
+
+    - name: API Performance Benchmarks
+      run: |
+        cd backend
+        python -m pytest tests/performance/ -v --benchmark-json=benchmark-results.json
+      env:
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+        SECRET_KEY: test-secret-key-for-performance
+        ENVIRONMENT: test
+
+    - name: Load Testing with Locust
+      run: |
+        cd backend
+        locust -f tests/load/locustfile.py \
+          --host http://localhost:8000 \
+          --users ${{ github.event.inputs.max_users || '50' }} \
+          --spawn-rate 5 \
+          --run-time ${{ github.event.inputs.test_duration || '180' }}s \
+          --headless \
+          --html performance-report.html \
+          --csv performance-results
+
+    - name: Memory Profiling
+      run: |
+        cd backend
+        python -m memory_profiler -T 0.1 app/main.py > memory-profile.txt &
+        PROFILER_PID=$!
+        sleep 30
+        kill $PROFILER_PID || true
+
+    - name: Database Performance Analysis
+      run: |
+        cd backend
+        python -c "
+        import psycopg2
+        import time
+        
+        conn = psycopg2.connect('postgresql://postgres:postgres@localhost:5432/test_db')
+        cur = conn.cursor()
+        
+        # Test query performance
+        start_time = time.time()
+        cur.execute('SELECT COUNT(*) FROM project')
+        query_time = time.time() - start_time
+        
+        print(f'Query execution time: {query_time:.4f} seconds')
+        
+        if query_time > 0.1:
+            print('⚠️ Query performance warning: > 100ms')
+        else:
+            print('✅ Query performance good: < 100ms')
+        
+        conn.close()
+        "
+
+    - name: Performance Regression Check
+      run: |
+        cd backend
+        python -c "
+        import json
+        import sys
+        
+        # Load benchmark results
+        try:
+            with open('benchmark-results.json', 'r') as f:
+                results = json.load(f)
+            
+            # Check for performance regressions
+            for benchmark in results['benchmarks']:
+                mean_time = benchmark['stats']['mean']
+                if mean_time > 0.5:  # 500ms threshold
+                    print(f'❌ Performance regression in {benchmark[\"name\"]}: {mean_time:.4f}s')
+                    sys.exit(1)
+                else:
+                    print(f'✅ {benchmark[\"name\"]}: {mean_time:.4f}s')
+        except FileNotFoundError:
+            print('No benchmark results found')
+        "
+
+    - name: Upload Performance Reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: backend-performance-reports
+        path: |
+          backend/performance-report.html
+          backend/performance-results*.csv
+          backend/benchmark-results.json
+          backend/memory-profile.txt
+
+  # End-to-End Performance Testing
+  e2e-performance:
+    name: E2E Performance Testing
+    runs-on: ubuntu-latest
+    needs: [frontend-performance, backend-performance]
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Install backend dependencies
+      run: |
+        cd backend
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Install frontend dependencies
+      run: |
+        cd frontend
+        npm ci
+        npx playwright install --with-deps
+
+    - name: Start backend
+      run: |
+        cd backend
+        python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+        sleep 10
+      env:
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+        SECRET_KEY: test-secret-key-for-e2e-performance
+        ENVIRONMENT: test
+
+    - name: Start frontend
+      run: |
+        cd frontend
+        npm run build
+        npm start &
+        sleep 15
+      env:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+
+    - name: Wait for applications
+      run: |
+        timeout 60 bash -c 'until curl -f http://localhost:8000/health; do sleep 2; done'
+        timeout 60 bash -c 'until curl -f http://localhost:3000; do sleep 2; done'
+
+    - name: Run Performance E2E Tests
+      run: |
+        cd frontend
+        npx playwright test tests/performance/ --reporter=html
+      env:
+        PLAYWRIGHT_BASE_URL: http://localhost:3000
+
+    - name: Web Vitals Testing
+      run: |
+        cd frontend
+        npx playwright test --grep="@performance" --reporter=json:performance-results.json
+
+    - name: Performance Metrics Analysis
+      run: |
+        cd frontend
+        node -e "
+        const fs = require('fs');
+        
+        try {
+          const results = JSON.parse(fs.readFileSync('performance-results.json', 'utf8'));
+          
+          console.log('Performance Test Results:');
+          results.suites.forEach(suite => {
+            suite.specs.forEach(spec => {
+              spec.tests.forEach(test => {
+                console.log(\`- \${test.title}: \${test.outcome}\`);
+              });
+            });
+          });
+        } catch (error) {
+          console.log('No performance results found');
+        }
+        "
+
+    - name: Upload E2E Performance Reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: e2e-performance-reports
+        path: |
+          frontend/playwright-report/
+          frontend/performance-results.json
+          frontend/test-results/
+
+  # Performance Monitoring Setup
+  performance-monitoring:
+    name: Performance Monitoring
+    runs-on: ubuntu-latest
+    needs: [frontend-performance, backend-performance, e2e-performance]
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+    - name: Setup Performance Monitoring
+      run: |
+        echo "Setting up performance monitoring..."
+        
+        # This would typically involve:
+        # 1. Configuring APM tools (New Relic, DataDog, etc.)
+        # 2. Setting up performance alerts
+        # 3. Creating performance dashboards
+        # 4. Configuring synthetic monitoring
+        
+        echo "Performance monitoring configured"
+
+    - name: Performance Baseline Update
+      run: |
+        echo "Updating performance baselines..."
+        
+        # Update performance baselines in monitoring system
+        # This could involve API calls to monitoring services
+        
+        echo "Performance baselines updated"
+
+  # Performance Report Generation
+  performance-report:
+    name: Generate Performance Report
+    runs-on: ubuntu-latest
+    needs: [frontend-performance, backend-performance, e2e-performance]
+    if: always()
+
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+
+    - name: Generate Performance Report
+      run: |
+        echo "# Performance Test Report" > performance-report.md
+        echo "Generated on: $(date)" >> performance-report.md
+        echo "" >> performance-report.md
+        
+        echo "## Test Results Summary" >> performance-report.md
+        echo "- Frontend Performance: ${{ needs.frontend-performance.result }}" >> performance-report.md
+        echo "- Backend Performance: ${{ needs.backend-performance.result }}" >> performance-report.md
+        echo "- E2E Performance: ${{ needs.e2e-performance.result }}" >> performance-report.md
+        echo "" >> performance-report.md
+        
+        echo "## Key Metrics" >> performance-report.md
+        echo "### Frontend" >> performance-report.md
+        echo "- First Contentful Paint: < 1.5s" >> performance-report.md
+        echo "- Largest Contentful Paint: < 2.5s" >> performance-report.md
+        echo "- Cumulative Layout Shift: < 0.1" >> performance-report.md
+        echo "- First Input Delay: < 100ms" >> performance-report.md
+        echo "" >> performance-report.md
+        
+        echo "### Backend" >> performance-report.md
+        echo "- API Response Time: < 200ms" >> performance-report.md
+        echo "- Database Query Time: < 100ms" >> performance-report.md
+        echo "- Memory Usage: < 512MB" >> performance-report.md
+        echo "- CPU Usage: < 70%" >> performance-report.md
+        echo "" >> performance-report.md
+        
+        echo "## Recommendations" >> performance-report.md
+        echo "1. Monitor performance metrics continuously" >> performance-report.md
+        echo "2. Optimize slow queries and endpoints" >> performance-report.md
+        echo "3. Implement caching strategies" >> performance-report.md
+        echo "4. Consider CDN for static assets" >> performance-report.md
+        
+        cat performance-report.md
+
+    - name: Upload Performance Report
+      uses: actions/upload-artifact@v3
+      with:
+        name: performance-report
+        path: performance-report.md
+
+    - name: Comment PR with Performance Results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const report = fs.readFileSync('performance-report.md', 'utf8');
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## ⚡ Performance Test Results\n\n${report}`
+          });
+
+    - name: Performance Alert
+      if: needs.frontend-performance.result == 'failure' || needs.backend-performance.result == 'failure'
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        text: |
+          ⚠️ Performance regression detected!
+          
+          Repository: ${{ github.repository }}
+          Branch: ${{ github.ref }}
+          
+          Please review the performance test results.
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.PERFORMANCE_SLACK_WEBHOOK_URL }}

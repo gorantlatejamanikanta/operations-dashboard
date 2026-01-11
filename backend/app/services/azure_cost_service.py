@@ -1,7 +1,8 @@
 """
 Azure Cost Management Service
-Connects to Azure to fetch cost data from Azure Cost Management API
+Handles integration with Azure Cost Management API
 """
+import os
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 from azure.identity import DefaultAzureCredential, ClientSecretCredential
@@ -11,123 +12,142 @@ from ..core.config import settings
 
 
 class AzureCostService:
-    """Service to fetch costs from Azure Cost Management API"""
-    
     def __init__(self):
         self.credential = None
-        if settings.AZURE_CLIENT_ID and settings.AZURE_CLIENT_SECRET and settings.AZURE_TENANT_ID:
-            self.credential = ClientSecretCredential(
-                tenant_id=settings.AZURE_TENANT_ID,
-                client_id=settings.AZURE_CLIENT_ID,
-                client_secret=settings.AZURE_CLIENT_SECRET
-            )
-        else:
-            # Try default credential (for local dev with Azure CLI)
-            try:
+        self.cost_client = None
+        self.resource_client = None
+        self._initialize_clients()
+    
+    def _initialize_clients(self):
+        """Initialize Azure clients with credentials"""
+        try:
+            if (settings.AZURE_CLIENT_ID and 
+                settings.AZURE_CLIENT_SECRET and 
+                settings.AZURE_TENANT_ID):
+                
+                self.credential = ClientSecretCredential(
+                    tenant_id=settings.AZURE_TENANT_ID,
+                    client_id=settings.AZURE_CLIENT_ID,
+                    client_secret=settings.AZURE_CLIENT_SECRET
+                )
+            else:
+                # Fallback to default credential (managed identity, CLI, etc.)
                 self.credential = DefaultAzureCredential()
-            except Exception:
-                pass
-        
-        self.subscription_id = getattr(settings, 'AZURE_SUBSCRIPTION_ID', None)
+            
+            if settings.AZURE_SUBSCRIPTION_ID:
+                self.cost_client = CostManagementClient(
+                    credential=self.credential,
+                    subscription_id=settings.AZURE_SUBSCRIPTION_ID
+                )
+                self.resource_client = ResourceManagementClient(
+                    credential=self.credential,
+                    subscription_id=settings.AZURE_SUBSCRIPTION_ID
+                )
+        except Exception as e:
+            print(f"Failed to initialize Azure clients: {e}")
     
     def is_configured(self) -> bool:
-        """Check if Azure credentials are configured"""
-        return self.credential is not None and self.subscription_id is not None
+        """Check if Azure credentials are properly configured"""
+        return (self.credential is not None and 
+                settings.AZURE_SUBSCRIPTION_ID is not None)
+    
+    def list_resource_groups(self, subscription_id: Optional[str] = None) -> List[Dict]:
+        """List all resource groups in the subscription"""
+        if not self.is_configured():
+            raise Exception("Azure credentials not configured")
+        
+        try:
+            resource_groups = []
+            for rg in self.resource_client.resource_groups.list():
+                resource_groups.append({
+                    "name": rg.name,
+                    "location": rg.location,
+                    "id": rg.id,
+                    "tags": rg.tags or {}
+                })
+            return resource_groups
+        except Exception as e:
+            raise Exception(f"Failed to list resource groups: {e}")
     
     def get_resource_group_costs(
-        self,
+        self, 
         resource_group_name: str,
         start_date: datetime,
         end_date: datetime,
         subscription_id: Optional[str] = None
     ) -> List[Dict]:
         """
-        Fetch costs for a specific resource group from Azure Cost Management API
-        
-        Args:
-            resource_group_name: Name of the Azure resource group
-            start_date: Start date for cost query
-            end_date: End date for cost query
-            subscription_id: Azure subscription ID (optional, uses default if not provided)
-        
-        Returns:
-            List of cost records with date and amount
+        Get costs for a specific resource group within a date range
+        Returns monthly aggregated costs
         """
         if not self.is_configured():
-            raise ValueError("Azure credentials not configured. Set AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID, and AZURE_SUBSCRIPTION_ID")
-        
-        sub_id = subscription_id or self.subscription_id
-        if not sub_id:
-            raise ValueError("Azure subscription ID not configured")
+            raise Exception("Azure credentials not configured")
         
         try:
-            cost_client = CostManagementClient(self.credential)
-            resource_client = ResourceManagementClient(self.credential, sub_id)
-            
-            # Get resource group details
-            resource_group = resource_client.resource_groups.get(resource_group_name)
-            
-            # Query cost data
-            # Note: Azure Cost Management API requires specific scope and query format
-            scope = f"/subscriptions/{sub_id}/resourceGroups/{resource_group_name}"
-            
-            # This is a simplified example - actual implementation would use Query API
-            # For production, you'd use the actual Azure Cost Management Query API
+            # For demo purposes, return mock data
+            # In production, this would use the Azure Cost Management API
             costs = []
+            current_date = start_date.replace(day=1)  # Start of month
             
-            # Placeholder - actual implementation would call Azure Cost Management API
-            # Example structure:
-            # query_definition = {
-            #     "type": "ActualCost",
-            #     "timeframe": "Custom",
-            #     "timePeriod": {
-            #         "from": start_date.isoformat(),
-            #         "to": end_date.isoformat()
-            #     },
-            #     "dataset": {
-            #         "granularity": "Daily",
-            #         "aggregation": {
-            #             "totalCost": {"name": "PreTaxCost", "function": "Sum"}
-            #         },
-            #         "grouping": []
-            #     }
-            # }
-            # result = cost_client.query.usage(scope=scope, parameters=query_definition)
+            while current_date <= end_date:
+                # Mock cost calculation (replace with actual API call)
+                import random
+                mock_cost = random.uniform(100, 5000)
+                
+                costs.append({
+                    "date": current_date,
+                    "cost": round(mock_cost, 2),
+                    "currency": "USD",
+                    "resource_group": resource_group_name
+                })
+                
+                # Move to next month
+                if current_date.month == 12:
+                    current_date = current_date.replace(year=current_date.year + 1, month=1)
+                else:
+                    current_date = current_date.replace(month=current_date.month + 1)
             
             return costs
             
         except Exception as e:
-            raise Exception(f"Failed to fetch Azure costs: {str(e)}")
+            raise Exception(f"Failed to get costs for resource group {resource_group_name}: {e}")
     
-    def list_resource_groups(self, subscription_id: Optional[str] = None) -> List[Dict]:
-        """
-        List all resource groups in a subscription
-        
-        Returns:
-            List of resource group dictionaries with name and metadata
-        """
+    def get_subscription_costs(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        subscription_id: Optional[str] = None
+    ) -> List[Dict]:
+        """Get costs for entire subscription"""
         if not self.is_configured():
-            raise ValueError("Azure credentials not configured")
+            raise Exception("Azure credentials not configured")
         
-        sub_id = subscription_id or self.subscription_id
-        if not sub_id:
-            raise ValueError("Azure subscription ID not configured")
-        
+        # Mock implementation - replace with actual Azure Cost Management API calls
         try:
-            resource_client = ResourceManagementClient(self.credential, sub_id)
-            resource_groups = resource_client.resource_groups.list()
+            costs = []
+            current_date = start_date.replace(day=1)
             
-            return [
-                {
-                    "name": rg.name,
-                    "location": rg.location,
-                    "id": rg.id,
-                    "tags": rg.tags or {}
-                }
-                for rg in resource_groups
-            ]
+            while current_date <= end_date:
+                import random
+                mock_cost = random.uniform(1000, 15000)
+                
+                costs.append({
+                    "date": current_date,
+                    "cost": round(mock_cost, 2),
+                    "currency": "USD",
+                    "subscription_id": subscription_id or settings.AZURE_SUBSCRIPTION_ID
+                })
+                
+                # Move to next month
+                if current_date.month == 12:
+                    current_date = current_date.replace(year=current_date.year + 1, month=1)
+                else:
+                    current_date = current_date.replace(month=current_date.month + 1)
+            
+            return costs
+            
         except Exception as e:
-            raise Exception(f"Failed to list resource groups: {str(e)}")
+            raise Exception(f"Failed to get subscription costs: {e}")
 
 
 # Global instance

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import { MsalProvider } from "@/app/components/MsalProvider";
+import { ThemeProvider } from "@/app/contexts/ThemeContext";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -18,9 +19,11 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={inter.className}>
-        <MsalProvider>
-          {children}
-        </MsalProvider>
+        <ThemeProvider>
+          <MsalProvider>
+            {children}
+          </MsalProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

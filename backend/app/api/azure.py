@@ -8,6 +8,7 @@ from typing import List, Optional
 from datetime import datetime, timedelta
 from ..services.azure_cost_service import azure_cost_service
 from ..core.database import get_db
+from ..core.auth import get_current_user
 from ..models.resource_group import ResourceGroup
 from ..models.project import Project
 from ..models.monthly_cost import MonthlyCost as MonthlyCostModel
@@ -27,7 +28,7 @@ class AzureSyncRequest(BaseModel):
 
 
 @router.get("/configured")
-def check_azure_configured():
+def check_azure_configured(current_user: dict = Depends(get_current_user)):
     """Check if Azure credentials are configured"""
     return {
         "configured": azure_cost_service.is_configured(),
@@ -37,7 +38,10 @@ def check_azure_configured():
 
 
 @router.get("/resource-groups")
-def list_azure_resource_groups(subscription_id: Optional[str] = None):
+def list_azure_resource_groups(
+    subscription_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
     """List all resource groups from Azure subscription"""
     try:
         resource_groups = azure_cost_service.list_resource_groups(subscription_id)
@@ -47,7 +51,11 @@ def list_azure_resource_groups(subscription_id: Optional[str] = None):
 
 
 @router.post("/sync-costs")
-def sync_azure_costs(request: AzureSyncRequest, db: Session = Depends(get_db)):
+def sync_azure_costs(
+    request: AzureSyncRequest, 
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
     """
     Sync costs from Azure for a resource group and import into the database
     
@@ -132,7 +140,8 @@ def get_azure_resource_group_costs(
     resource_group_name: str,
     start_date: str,
     end_date: str,
-    subscription_id: Optional[str] = None
+    subscription_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
 ):
     """Fetch costs for a specific Azure resource group"""
     try:

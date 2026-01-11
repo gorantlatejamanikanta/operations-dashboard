@@ -1,8 +1,12 @@
 from pydantic_settings import BaseSettings
 from typing import Optional
+import os
 
 
 class Settings(BaseSettings):
+    # Environment
+    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
+    
     # Database
     DATABASE_URL: str
     
@@ -19,12 +23,33 @@ class Settings(BaseSettings):
     AZURE_OPENAI_DEPLOYMENT_NAME: str = "gpt-4o"
     
     # Security
-    SECRET_KEY: str = "your-secret-key-change-in-production"
+    SECRET_KEY: str
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     
     # CORS
-    CORS_ORIGINS: list[str] = ["http://localhost:3000"]
+    CORS_ORIGINS: list[str] = []
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        
+        # Validate required settings
+        if not self.SECRET_KEY or self.SECRET_KEY == "your-secret-key-change-in-production":
+            if self.ENVIRONMENT == "production":
+                raise ValueError("SECRET_KEY must be set to a secure value in production")
+            else:
+                # Generate a random key for development
+                import secrets
+                self.SECRET_KEY = secrets.token_urlsafe(32)
+        
+        # Set default CORS origins if not provided
+        if not self.CORS_ORIGINS:
+            if self.ENVIRONMENT == "production":
+                # In production, CORS_ORIGINS must be explicitly set
+                raise ValueError("CORS_ORIGINS must be explicitly configured in production")
+            else:
+                # Development defaults
+                self.CORS_ORIGINS = ["http://localhost:3000", "http://localhost:3001"]
     
     class Config:
         env_file = ".env"

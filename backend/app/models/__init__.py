@@ -5,6 +5,7 @@ from .project_resource_group import ProjectResourceGroup
 from .monthly_cost import MonthlyCost
 from .cost_data import CostData
 from .project_cost_summary import ProjectCostSummary
+from .cloud_connection import CloudConnection
 
 __all__ = [
     "Project",
@@ -14,4 +15,5 @@ __all__ = [
     "MonthlyCost",
     "CostData",
     "ProjectCostSummary",
+    "CloudConnection",
 ]
