@@ -29,7 +29,6 @@ yarn-error.log*
 .env
 .env.local
 .env*.local
-.env.example
 
 # IDE
 .vscode/
@@ -51,3 +50,33 @@ terraform.tfvars
 
 # Docker
 .dockerignore
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+server.log
+
+# Test coverage
+htmlcov/
+.coverage
+coverage.xml
+.pytest_cache/
+test-results/
+playwright-report/
+
+# Security
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Temporary files
+*.tmp
+*.temp
+.cache/

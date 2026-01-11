@@ -4,24 +4,18 @@ updates:
   - package-ecosystem: "pip"
     directory: "/backend"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
       day: "monday"
       time: "09:00"
-    open-pull-requests-limit: 10
-    reviewers:
-      - "security-team"
-    assignees:
-      - "backend-team"
+    open-pull-requests-limit: 3
     commit-message:
       prefix: "deps"
-      prefix-development: "deps-dev"
       include: "scope"
     labels:
       - "dependencies"
       - "backend"
     allow:
       - dependency-type: "direct"
-      - dependency-type: "indirect"
     ignore:
       # Ignore major version updates for critical dependencies
       - dependency-name: "fastapi"
@@ -35,24 +29,18 @@ updates:
   - package-ecosystem: "npm"
     directory: "/frontend"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
       day: "monday"
       time: "09:00"
-    open-pull-requests-limit: 10
-    reviewers:
-      - "security-team"
-    assignees:
-      - "frontend-team"
+    open-pull-requests-limit: 3
     commit-message:
       prefix: "deps"
-      prefix-development: "deps-dev"
       include: "scope"
     labels:
       - "dependencies"
       - "frontend"
     allow:
       - dependency-type: "direct"
-      - dependency-type: "indirect"
     ignore:
       # Ignore major version updates for critical dependencies
       - dependency-name: "next"
@@ -62,78 +50,17 @@ updates:
       - dependency-name: "react-dom"
         update-types: ["version-update:semver-major"]
 
-  # Docker dependencies
-  - package-ecosystem: "docker"
-    directory: "/backend"
-    schedule:
-      interval: "weekly"
-      day: "tuesday"
-      time: "09:00"
-    reviewers:
-      - "devops-team"
-    assignees:
-      - "devops-team"
-    commit-message:
-      prefix: "docker"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "docker"
-      - "backend"
-
-  - package-ecosystem: "docker"
-    directory: "/frontend"
-    schedule:
-      interval: "weekly"
-      day: "tuesday"
-      time: "09:00"
-    reviewers:
-      - "devops-team"
-    assignees:
-      - "devops-team"
-    commit-message:
-      prefix: "docker"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "docker"
-      - "frontend"
-
   # GitHub Actions dependencies
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "wednesday"
+      interval: "monthly"
+      day: "monday"
       time: "09:00"
-    reviewers:
-      - "devops-team"
-    assignees:
-      - "devops-team"
+    open-pull-requests-limit: 2
     commit-message:
       prefix: "ci"
       include: "scope"
     labels:
       - "dependencies"
       - "github-actions"
-      - "ci/cd"
-
-  # Terraform dependencies
-  - package-ecosystem: "terraform"
-    directory: "/terraform"
-    schedule:
-      interval: "weekly"
-      day: "thursday"
-      time: "09:00"
-    reviewers:
-      - "devops-team"
-      - "security-team"
-    assignees:
-      - "devops-team"
-    commit-message:
-      prefix: "terraform"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "terraform"
-      - "infrastructure"
