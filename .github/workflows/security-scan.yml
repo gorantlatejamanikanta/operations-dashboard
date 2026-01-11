@@ -117,7 +117,7 @@ jobs:
 
     - name: Container - Grype Vulnerability Scanner
       if: matrix.scan-type == 'container'
-      uses: anchore/scan-action@v3
+      uses: anchore/scan-action@v7
       with:
         image: "backend-scan"
         fail-build: false
